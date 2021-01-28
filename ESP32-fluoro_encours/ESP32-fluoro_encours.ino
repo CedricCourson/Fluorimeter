@@ -1,6 +1,10 @@
 /*
  * Fonctionne trés bien avec capteur de pression et température
- * Reste à intégrer la sonde fluo et eventuellement salinité ou O2....
+ * fluo intégré ok mais pb de longueur de chaine, pb qui avait été reglé dans le code dédié mais qui réaparait ici
+ * 
+ * A ajouter : 
+ * Pourcentage batterie
+ * Affichage ecran à modifier
  * 
  */
 
@@ -20,6 +24,7 @@
 #include "SPI.h"                        // pour connection ecran bus SPI
 #include <SD.h>                         // pour carte SD
 #include "MS5837.h"                     // pour capteur de pression blue robotics 
+#include <HardwareSerial.h>             // pour capteur serie fluo
 
 //SPI pin definitions pour ecran epaper
 GxIO_Class io(SPI, /*CS=5*/ 0, /*DC=*/ 13, /*RST=*/ 25); // arbitrary selection of 17, 16  //SS remplacé par 0
@@ -49,14 +54,33 @@ String datachain = "";                   // chaine de donnée texte de mesure
 String filename, filename_temp, str_index, filetrans;
 int ind;                  // index vérification de fichier
 
-
 //déclaration pour capteur de pression
 MS5837 sensor;
 float  wat_pressure, wat_temp, wat_depth, alt;
 
+// déclaration pour capteur de fluo
+#define RXD2 16 //25
+#define TXD2 17 //26
+HardwareSerial Serial1(1); // si 25/26 alors Serial2(2), et modifier tout les Serial1 par Serial2.
+String fluochain; 
+String datafluo;
+int c;
+const char marqueurDeFin = '\r';
+int pinFluo =27;
+
+
+/*
+ * ---------------------------- PARTIE SETUP, INITIATLIISATION DE TOUTES LES PARTIES AU DEMARRAGE -----------------------------------------------------
+ */
+
+
 
 void setup() {
+  pinMode(pinFluo, OUTPUT);
+  digitalWrite(pinFluo, LOW);                 // pin fluo allumé
   Serial.begin(115200);                        // communication PC
+  Serial1.begin(9600, SERIAL_8N1, RXD2, TXD2); // communication serie avec la sonde de fluo
+  delay(3000);
   Wire.begin();                                // for I2C communication
   display.init();                              // enable display Epaper
   delay(500); //Take some time to open up the Serial Monitor and enable all things  
@@ -75,25 +99,7 @@ void setup() {
   Serial.println("card initialized.");   
 
   //création nom de fichier :
-      // lecture de l'horloge rtc pour création de nom de fichier
-      int sec=Clock.getSecond();
-      if(sec<10){second = String(0) + String(sec);}
-      else{second = sec;}
-      int minu=Clock.getMinute();
-      if(minu<10){minute = String(0) + String(minu);}
-      else{minute = minu;}
-      int heure=Clock.getHour(h12, PM);
-      if(heure<10){hour = String(0) + String(heure);}
-      else{hour = heure;}
-      int jour=Clock.getDate();
-      if(jour<10){date = String(0) + String(jour);}
-      else{date = jour;}
-      int mois=Clock.getMonth(Century);
-      if(mois<10){month = String(0) + String(mois);}
-      else{month = mois;}
-      year=Clock.getYear();
-      datenum =""; datenum +=year; datenum +=month; datenum +=date;
-      timenum =""; timenum +=hour; timenum +=minute; timenum +=second;
+      lecture_rtc();// lecture de l'horloge rtc pour création de nom de fichier
 
       // création du nom de fichier et écriture sur la carte SD en automatisant la vérification de fichiers existant.
       filename =""; filename +="/"; filename += datenum;
@@ -112,12 +118,12 @@ void setup() {
       }
 
       filename = filename_temp;   // création du nom de fichier final  
-  // fin de création de fichier
+   // fin de création de fichier
 
 
   // 1ere ligne du fichier
   datachain += "Date"; datachain += " ; "; datachain += "Time" ; datachain += " ; ";
-  datachain += "Profondeur"; datachain += " ; ";   datachain += "Temperature "; datachain += " ; ";
+  datachain += "Profondeur"; datachain += " ; ";   datachain += "Temperature "; datachain += " ; "; datachain += "Fluochain"; datachain += ";";
   
 
   // afficher la datachain sur le port serie
@@ -150,44 +156,41 @@ void setup() {
   sensor.setModel(MS5837::MS5837_30BA);
   sensor.setFluidDensity(1029); // kg/m^3 (1029 for seawater, 997 for freshwater)
 
+ Serial.println("--------End initialization---------");
+ Serial.println(" ");
 
-
-
-
-  delay(500);
+  delay(2000);
   
 }
 
+
+/*
+ * ---------------------------------------- BOUCLE DU PROGRAMME PRINCIPALE --------------------------------------------------------------------------------------
+ */
+
+
 void loop() {
 
-      // lecture de l'horloge rtc
-      int sec=Clock.getSecond();
-      if(sec<10){second = String(0) + String(sec);}
-      else{second = sec;}
-      int minu=Clock.getMinute();
-      if(minu<10){minute = String(0) + String(minu);}
-      else{minute = minu;}
-      int heure=Clock.getHour(h12, PM);
-      if(heure<10){hour = String(0) + String(heure);}
-      else{hour = heure;}
-      int jour=Clock.getDate();
-      if(jour<10){date = String(0) + String(jour);}
-      else{date = jour;}
-      int mois=Clock.getMonth(Century);
-      if(mois<10){month = String(0) + String(mois);}
-      else{month = mois;}
-      year=Clock.getYear();
-      datenum =""; datenum +=year; datenum +=month; datenum +=date;
-      timenum =""; timenum +=hour; timenum +=minute; timenum +=second;
+      digitalWrite(pinFluo, HIGH);      // on allume la sonde trilux
+      delay(3000);                      // la sonde a besoin de temps au démarrage
 
-      // Make measure 
-      mesure_pressure();
+     
+      lecture_rtc();               // lecture de l'horloge rtc
+
+      mesure_pressure();        //measure pressure/temp
+      
+      //measure fluo
+
+      mes_fluo(); delay(500); fluochain = ""; datafluo = "";  // on lit une fois et on vide la valeur pour éviter que la chaine de soit lu en plein milieu et recommence bien au debut
+      mes_fluo();              // on lit vraiment la chaine et on l'enregistre dans la variable datafluo
+      Serial.print("datafluo : "); Serial.println(datafluo);
+ 
       
       // Création de la chaine à enregistrer sur la carte SD
       String datachain ="";
       datachain += year; datachain += "/";datachain += month; datachain += "/";datachain += date; datachain += " ; ";
       datachain += hour; datachain += ":";datachain += minute; datachain += ":"; datachain += second; datachain += " ; ";
-      datachain += wat_depth; datachain += " ; "; datachain += wat_temp; datachain += " ; "; 
+      datachain += wat_depth; datachain += " ; "; datachain += wat_temp; datachain += " ; "; datachain += datafluo; datachain += ";";
       
       // enregistrement sur la carte SD
         File dataFile = SD.open(filename, FILE_APPEND);
@@ -202,9 +205,12 @@ void loop() {
         }
 
 
-      // Affichage ecran des datas
+      // Affichage port serie des datas
+      Serial.println(" ");
       Serial.println("Datachain : "); Serial.println(datachain); //affichage de la chaine complete sur le port serie
-
+      Serial.println(" ");
+      Serial.println("------------------------------------");
+      
       // affichage ecran des data 
       display.setRotation(3);
       display.fillScreen(GxEPD_WHITE);
@@ -232,11 +238,20 @@ void loop() {
       display.update();
 
 
+   digitalWrite(pinFluo, LOW);
+
    delay (5000);
 }
 
 
-void mesure_pressure(){
+
+/*
+ * -------------------- ECRITURE DES FONCTIONS APPELLE DANS LE PROGRAMME -------------------------------------------------------------------------------
+ */
+
+
+
+void mesure_pressure(){                               // fonction mesure de la pression et température sur le capteur blue robotics
   // Update pressure and temperature readings
   sensor.read();
 
@@ -262,7 +277,53 @@ void mesure_pressure(){
   Serial.println(" m above mean sea level");
 }
 
-void affichageintro(){                     // texte intro à l'allumage
+
+
+void mes_fluo(){                                       // fonction mesure sur le capteur de fluorimetrie
+  int readfluo = 1;
+  while(Serial1.available() && readfluo==1){
+  c = Serial1.read();
+  if(c != -1){
+    switch (c) {
+      case marqueurDeFin:
+      Serial.print("fluochain : "); Serial.println(fluochain); 
+      datafluo = fluochain;
+      fluochain="";
+      readfluo=0;
+      default:
+      fluochain += char(c);
+    }
+   }
+  } 
+}
+
+
+void lecture_rtc(){                           // fonction lecture de l'horloge RTC et ecriture dans les variables utilent
+      int sec=Clock.getSecond();
+      if(sec<10){second = String(0) + String(sec);}
+      else{second = sec;}
+      int minu=Clock.getMinute();
+      if(minu<10){minute = String(0) + String(minu);}
+      else{minute = minu;}
+      int heure=Clock.getHour(h12, PM);
+      if(heure<10){hour = String(0) + String(heure);}
+      else{hour = heure;}
+      int jour=Clock.getDate();
+      if(jour<10){date = String(0) + String(jour);}
+      else{date = jour;}
+      int mois=Clock.getMonth(Century);
+      if(mois<10){month = String(0) + String(mois);}
+      else{month = mois;}
+      year=Clock.getYear();
+      datenum =""; datenum +=year; datenum +=month; datenum +=date;
+      timenum =""; timenum +=hour; timenum +=minute; timenum +=second;
+}
+
+
+
+
+
+void affichageintro(){                                  // texte intro à l'allumage, juste pour faire jolie et afficher éventuellement les versions du programme
   display.setRotation(3);
   display.fillScreen(GxEPD_WHITE);
   
@@ -271,13 +332,12 @@ void affichageintro(){                     // texte intro à l'allumage
   display.setFont(f4);
   display.setCursor(25, 55  );
   display.println("MESURE ");
-
  
   display.update();
 }
 
 
-void errormessage(){                     // texte intro à l'allumage
+void errormessage(){                                       // message d'erreur en cas d'impossibilité de lire la carte SD
 
   Serial.println("Error : error with sd card");
   display.setRotation(3);
