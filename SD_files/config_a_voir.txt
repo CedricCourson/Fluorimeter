@@ -1,0 +1,15 @@
+id_logger=OSOFL001;    Ne pas toucher de chiffre
+User=Ced;              Nom de l'installateur
+delay_batch=10;        Temp en seconde, temps de mise en veille entre 2 series de mesures (900s par défault)
+number_measures=2;     Nombre de  mesures (3 par défaults)
+gps_timeOut=1;         En seconde delay pour chercher la 1er connexion avant de passer de force à la suite (180s par défault)
+fluo_timeOut=3;        En seconde, durée maximum de lecture de la sonde pour ne pas blocque en cas d'erreur de mesure
+fluo_delay_chauffe=5;  En s
+mode_screen=1;         1 si affichage ecran, 0 si pas d'affichage
+bat_capacity=3400;     mAh
+Fluo_type=2125-050-PL; Type de sonde 
+Fluo_serial=080;       Numéro de serie de la sonde 
+Fluo_channel0=Chl;     Type de données sur le channel 0
+Fluo_channel1=Nph;     Type de données sur le channel 0
+Fluo_channel2=Phyco;   Type de données sur le channel 0
+clef_test=42;          Ne pas oublier de taper "retour à la ligne aprés la derniére ligne de config

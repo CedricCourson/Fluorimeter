@@ -1,0 +1,8 @@
+id_logger=OSOFL002;    Numéro de serie de l'instrument 
+User=Yoann Thomas;     Nom de l'installateur
+delay_batch=10;        Temp en seconde, temps de mise en veille entre 2 series de mesures (900s par défault)
+number_measures=2;     Nombre de  mesures par batch (30 par défault)
+gps_timeOut=10;        En seconde, delai pour chercher les sattelite avant de passer à la suite (60s par défault)
+fluo_delay_chauffe=8;  En s, (15s par défault)
+mode_screen=1;         1 si affichage ecran, 0 si pas d'affichage (1 par défault)
+clef_test=42;          Ne pas oublier de taper "retour à la ligne aprés la derniére ligne de config
