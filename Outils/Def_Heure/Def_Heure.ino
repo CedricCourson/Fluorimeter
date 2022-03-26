@@ -29,11 +29,11 @@ void loop() {
     donnee = Serial.read();
     // set time
     Clock.setSecond(00);//Set the second
-    Clock.setMinute(41);//Set the minute
-    Clock.setHour(9);  //Set the hour
-    Clock.setDoW(05);    //Set the day of the week
-    Clock.setDate(11);  //Set the date of the month
-    Clock.setMonth(2);  //Set the month of the year
+    Clock.setMinute(29);//Set the minute
+    Clock.setHour(14);  //Set the hour
+    Clock.setDoW(03);    //Set the day of the week
+    Clock.setDate(23);  //Set the date of the month
+    Clock.setMonth(3);  //Set the month of the year
     Clock.setYear(22);  //Set the year (Last two digits of the year)
     Clock.setClockMode(false); // pour avoir le format 24h
     Serial.println("synchro ok");

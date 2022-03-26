@@ -481,7 +481,7 @@ void setup() {
         display.setCursor(0, 110); display.print(datetime);
         //display.setCursor(0,110); display.print(date);display.print("/");display.print(month);display.print("/");display.print(year);  //date
         //display.setCursor(123,110);display.print(hour);display.print("h");display.print(minute);                                       //heure
-        display.setCursor(210, 110); display.print("Bat:"); display.print(FuelGauge.percent(),0); display.print("%");
+        display.setCursor(210, 110); display.print("Bat:"); display.print(bat_percent,0); display.print("%");
         display.setCursor(0, 124); display.print("Temp interne : "); display.print(tempint); display.print(" deg C");
         //      display.setCursor(0, 125); display.print("Lat:");display.print(gps.location.lat(), 5);                                                     //lattitude
         //      display.setCursor(148,125); display.print("Lng:");display.print(gps.location.lng(), 4);                                                   //longitude
