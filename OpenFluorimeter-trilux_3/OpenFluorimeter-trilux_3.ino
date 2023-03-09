@@ -1,29 +1,31 @@
  /*
-    ---------- FLUORIMETER ------------------
+    ---------- Multiparameter ------------------
     www.openoceanography.org
-    Fluorimetre open source pour le projet OPEN LAGOON.
+    Instrument multiparametre open source pour le projet OPEN LAGOON.
 
     Cet instrument mesure :
     Chlorophyle
     Turbidité
     Température eau de mer
-    Salinité eau de mer (coductivité)
+    Salinité eau de mer (conductivité)
     Pression
     + température interne du boitier
 
-   Etat: 1.8 = fonctionne ok, mais bug sur la fluo via DF-i2c-Uart
-   ajout GPS
-   Calcul Salinité
-   Mesure Fluo via module I2c Uart (avec Option pour uart via esp32) + ajout des capa
-   Ajout fichier config
-   Céreation d'un fichier meta
+    
+    - Version 3.0 : -
+    retrait du GPS
+    utilisation du 5v pour EC sensors
+    Gestion de fichier modifié, uniquement sur datalog, pas de fichier journalier.
 
-   Reste a faire :
-   - gérer les fichier par date
-   - régler le pb de fiabilité avec module i2c Uart, au bout de quelque cycle (2/3 min) les valeur affiche 999 999 999 9999 ....
-   - gérer format chain fluo (virgule + le retours a la ligne de la trilux induit un saut de ligne entre chaque ligne de mesure du CSV)
-   - harmoniser certaine variable dans ce code et avec SensOcean, enlever les variables superflu
-   - eventuellement ajouter la lecture des infos battery dans une fonction
+    Fonctionne en l'état : ok validé le 24/01/2023 (all sensors + screen + sd, datalog...)
+
+    Reste à modifier : 
+    - affichage led à configurer (pour le moment c'est juste pas régler)
+    - gestion du buzzer
+    - voyant led bleu de l'esp qui reste allument en veille ?
+    - a tester, l'ILS
+    - à tester : Led UV
+    - à tester : servo moteur
 */
 
 
@@ -31,7 +33,7 @@
 // ---------------------   PARAMETRES MODIFIABLE DU PROGRAM    -----------------------------------
 // Version et numero de serie
 String fichier_config = "/config.txt";   // nom du fichier de configuration
-char versoft[] = "2.3";                 // version du code
+char versoft[] = "3.1";                 // version du code
 int delay_affichage_ecran=2;             // en seconde
 int delay_i2c=100;                       // en ms (temps qui suit l'ouverture  ou la fermeture d'une transmission i2c) pas forcément utile
 int delay_lec=100;                        // en ms (temps de pause entre la lecture d'un capteur puis un autre)
@@ -63,21 +65,22 @@ int delay_lec=100;                        // en ms (temps de pause entre la lect
 #include "SPI.h"                        // pour connection ecran bus SPI
 #include <SD.h>                         // pour carte SD                         
 #include "MS5837.h"                     // pour capteur de pression blue robotics https://github.com/bluerobotics/BlueRobotics_MS5837_Library   
+#include "TSYS01.h"                     // capteur de températuer rapide et précis
 #include <HardwareSerial.h>             // pour capteur serie fluo
 //#include <SparkFunBQ27441.h>            // Batterie fuel gauge lipo babysister    https://github.com/sparkfun/SparkFun_BQ27441_Arduino_Library
 #include <OneWire.h>                    // pour capteur ds18b20
 #include <DallasTemperature.h>          // pour capteur ds18b20                   https://github.com/milesburton/Arduino-Temperature-Control-Library
-#include <TinyGPS++.h>                  // Gps                                    https://github.com/mikalhart/TinyGPSPlus
-#include "MAX17043.h"                   // Fuel gauge
+//#include <TinyGPS++.h>                  // Gps                                    https://github.com/mikalhart/TinyGPSPlus
+//#include "MAX17043.h"                   // Fuel gauge
 #include <ESP32_Servo.h>                // Librarie for servo motors
+
 
 ////SPI pin definitions pour ecran epaper
 //GxIO_Class io(SPI, /*CS=5*/ 0, /*DC=*/ 13, /*RST=*/ 10); // arbitrary selection of 17, 16  //SS remplacé par 0
 //GxEPD_Class display(io, /*RST=*/ 10, /*BUSY=*/ 4); // arbitrary selection of (16), 4
 
-// spi pin definitons pour ecran V2
+// spi pin definitons pour ecran epaper V2
 GxEPD2_BW<GxEPD2_290_T94_V2, GxEPD2_290_T94_V2::HEIGHT> display(GxEPD2_290_T94_V2(/*CS=5*/ 0, /*DC=*/ 13, /*RST=*/ 10, /*BUSY=*/ 4)); // GDEM029T94, Waveshare 2.9" V2 variant
-
 const GFXfont* f1 = &FreeMonoBold9pt7b;               // Font
 const GFXfont* f2 = &FreeMonoBold12pt7b;
 const GFXfont* f3 = &FreeMonoBold18pt7b;
@@ -90,8 +93,7 @@ bool Century = false;
 bool h12;
 bool PM;
 String second, minute, hour, date, month, year;
-String datenum, timenum;                   // pour format de date en 1 seule écriture
-String datetime;
+String datenum, timenum, datetime;                   // pour format de date en 1 seule écriture
 
 
 //// Set BATTERY_CAPACITY to the design capacity of your battery.
@@ -100,28 +102,31 @@ String datetime;
 //unsigned int volts;
 
 
-// definition pour GPS
-TinyGPSPlus gps; 
-HardwareSerial Serial_gps(2);                           
-int gpspin=14;
-unsigned long t0;
-//int gps_tempo=0;
-String gps_lat, gps_long;
+
+// // definition pour GPS
+// TinyGPSPlus gps; 
+// HardwareSerial Serial_gps(2);                           
+// unsigned long t0;
+// //int gps_tempo=0;
+// String gps_lat, gps_long;
 
 
 // déclaration pour la gestion de fichier sur la carte SD et fichier config
 String datachain = "";                   // chaine de donnée texte de mesure
-int cspin_SD=5;
-String filename, filename_temp, str_index, filetrans;
+const int cspin_SD=5;
+String filename = "/datalog.csv";        // nom du fichier de données
+String filename_temp, str_index, filetrans;
 int ind;                      // index vérification de fichier
 //fichier config
 String id_logger, user, number_measures, delay_batch, gps_timeOut, fluo_timeOut, fluo_delay_chauffe, mode_screen, bat_capacity ,clef_test;
 File confFile;
 
 
-//déclaration pour capteur de pression
+//déclaration pour capteur de pression et temperature de Blue Robotic
 MS5837 sensor_bar30;
-float  wat_pressure, wat_temp, wat_depth, alt;
+TSYS01 sensor_fastTemp;
+float  wat_pressure, wat_temp, wat_depth, alt, fast_temp;
+
 
 
 // Definition for the serial expand module
@@ -135,12 +140,12 @@ HardwareSerial Serial_exp(1); // si 25/26 alors SerialGPS(2), et modifier tout l
 //int port = 0;            //what port to open
 
 
-// definiton for fluo sensors and logging
+// Definiton for fluo sensors and logging
 String fluochain,datafluo,fluoFinal;
 const char marqueurDeFin = '\r';
 int c;
 int StartStock = 0;
-int pinFluo = 27;
+
 int delay_chauffe = 10; // delay de mise en route de la trilux en s
 
 String chan0="Chl";
@@ -150,16 +155,7 @@ String chan3="Valim";
 String chan4="Vref";
 
 
-// definition pour la fonction deepsleep de l'ESP32
-#define uS_TO_S_FACTOR 1000000                // Conversion factor for micro seconds to seconds
-RTC_DATA_ATTR int bootCount = 0;              // utile pour enregistrer un compteur dans la memoire rtc de l'ULP pour un compteur permettant un suivi entre chaque veille
-//RTC_DATA_ATTR int filenumber = 0;             // nom de fichier pour le garder entre l'initialisation (1er boot) et les mesures (tout les autres boots)
-RTC_DATA_ATTR unsigned long batch_number = 0; //numéro de lot de mesure de puis le démarrage
-int TIME_TO_SLEEP = 900;                      // Durée d'endormissement entre 2 cycles complets de mesures (in seconds) par défault 900 = 15min
-int nbrMes = 30;                              // nombre de mesure dans un cycle, par défault 30
-
-
-// definition pour les carte Atlas
+// definition pour la carte Atlas EC
 #define ecAddress 100
 byte ecCode = 0;                    // Used to hold the I2C response code.
 byte ecInChar = 0;                  // Used as a 1 byte buffer to store in bound bytes from the EC Circuit.
@@ -187,31 +183,49 @@ DallasTemperature sensor_ds18b20(&oneWire);
 float tempint;
 
 
-// TIME out _ default value
-int gps_time_out=60;  //secondes
-//int fluo_time_out=3;   //secondes
+// definition pour la fonction deepsleep de l'ESP32
+#define uS_TO_S_FACTOR 1000000                // Conversion factor for micro seconds to seconds
+RTC_DATA_ATTR int bootCount = 0;              // utile pour enregistrer un compteur dans la memoire rtc de l'ULP pour un compteur permettant un suivi entre chaque veille
+RTC_DATA_ATTR unsigned long batch_number = 0; //numéro de lot de mesure de puis le démarrage
+int TIME_TO_SLEEP = 10;                      // Durée d'endormissement entre 2 cycles complets de mesures (in seconds) par défault 900 = 15min
+int nbrMes = 5;                              // nombre de mesure dans un cycle, par défault 30
 
 
-// Isolaror
-//const int isolpin = 15;
-const int isopin = 15;
+// // TIME out _ default value
+// int gps_time_out=60;  //secondes
+// //int fluo_time_out=3;   //secondes
 
-//Baterry voltage reader
+
+// // Isolaror
+// //const int isolpin = 15;
+// const int isopin = 15;
+
+// Battery voltage reader
 const int batpin= 39;
 float bat_voltage = 0;
 float bat_percent = 0;
 int mes = 0;
 
+
 // Servo motor
 Servo myservo;  // create servo object to control a servo
 int pos = 0;    // variable to store the servo position
-int servopin = 12; // Recommended PWM GPIO pins on the ESP32 include 2,4,12-19,21-23,25-27,32-33 
+const int servopin = 12; // Recommended PWM GPIO pins on the ESP32 include 2,4,12-19,21-23,25-27,32-33 
 
 
+// Pin for power controling
+int En_5v=14;
+int En_12v = 27;
+// IMH Pin
+const int lightPin = 9;
+//const int buzzPin = 26;
+const int ilsPin = 15; 
 
+// buzzer pin 
+const int TONE_OUTPUT_PIN = 26;
+const int TONE_PWM_CHANNEL = 0; 
 
 void setup() {
-
 
   // -------------------------------------------------------------------------------------------------------------------
   // ------------------        HERE IS NEEDED THE PARAMETER FOR THE ENTIER PROGRAMM   ----------------------------------
@@ -224,40 +238,56 @@ void setup() {
   //INITS
   Serial.begin(115200);                        // communication PC
   Serial_exp.begin(9600, SERIAL_8N1, RXD1, TXD1); // communication serie avec la sonde de fluo uniquement si fluo sur UART de l'esp32
-  Serial_gps.begin(9600, SERIAL_8N1, 25, 26);     // communication serie avec GPS
+  //Serial_gps.begin(9600, SERIAL_8N1, 25, 26);     // communication serie avec GPS
   Wire.begin();                                // for I2C communication
   display.init();                              // enable display Epaper
-  FuelGauge.begin();                           // initialize the lipo fuel gauge
+  //FuelGauge.begin();                           // initialize the lipo fuel gauge
   myservo.attach(servopin);
-  delay(500); //Take some time to open up the Serial Monitor and enable all things
+  ledcAttachPin(TONE_OUTPUT_PIN, TONE_PWM_CHANNEL);
+  ledcWrite(TONE_PWM_CHANNEL, 0);  
+
+  if(bootCount == 0) play_start();
+
+
+  
+  delay(200); //Take some time to open up the Serial Monitor and enable all things
 
   // set the different pin
-  //pinMode(s1, OUTPUT);                                //Set the digital pin as output
-  //pinMode(s2, OUTPUT);                                //Set the digital pin as output
-  //pinMode(s3, OUTPUT);                                //Set the digital pin as output
-  pinMode(pinFluo, OUTPUT);          // define pin fluo
-  pinMode(gpspin, OUTPUT);            // define pin gps
-  pinMode(isopin, OUTPUT);
-  digitalWrite(pinFluo, LOW);        // turn off the pin fluo
-  digitalWrite(gpspin, LOW);          // turn off the gps
-  digitalWrite(isopin, LOW);
-  pinMode(batpin, INPUT);
+  pinMode(En_12v, OUTPUT);          // define pin fluo
+  pinMode(En_5v, OUTPUT);           // define pin gps
+  pinMode(batpin, INPUT);           // for batterie voltage mesuring
+  pinMode(lightPin, OUTPUT);        // for the light
+  //pinMode(buzzPin, OUTPUT);         // for the buzzer
 
-  // Test et initialisation des composants blocquants (carte SD, batterie, pression)
+
+  // ADD PIN FOR BUZZER AND LIGHT AND ILS
+
+  // power on all sensors
+  digitalWrite(En_12v, HIGH);        // turn off the pin fluo
+  digitalWrite(En_5v, HIGH);         // turn off the gps
+  digitalWrite(lightPin, HIGH);
+  //digitalWrite(buzzPin, LOW);
+  delay(800);                       // let some time to power on the sensors
+  
+
+  // initialise all sensors that needs it
   test_sd();                                   // test SD
-  test_bar();                                    // test capteur de pression
+  sensor_fastTemp.init();                      // initiate fast_temp Blue robotics
+  sensor_bar30.init();                         // initiate Bar30 blue robotics and some parameter for water pressure
+  sensor_bar30.setModel(MS5837::MS5837_30BA);
+  sensor_bar30.setFluidDensity(1029); // kg/m^3 (1029 for seawater, 997 for freshwater)
 
-
-  // on lit le fichier de configuration pour en extraire les valeurs 
+  // we read file configuration to set some parameters
   lecture_config();
     // on redifinie les variables de mise en veille à partir de la lecture du fichier config.txt
     TIME_TO_SLEEP=delay_batch.toInt();         // en s
     nbrMes=number_measures.toInt();            
-    gps_time_out=gps_timeOut.toInt()*1000;    // résultat en s
-    //fluo_time_out=fluo_timeOut.toInt()*1000;  // résulat en s
     mode_screen=mode_screen.toInt();        
-    //BATTERY_CAPACITY=bat_capacity.toInt();    // en mAh   
     delay_chauffe=fluo_delay_chauffe.toInt();  // en s
+    //gps_time_out=gps_timeOut.toInt()*1000;    // résultat en s
+    //fluo_time_out=fluo_timeOut.toInt()*1000;  // résulat en s
+    //BATTERY_CAPACITY=bat_capacity.toInt();    // en mAh   
+
 
 
   if (bootCount == 0) //Run this only the first time
@@ -268,6 +298,7 @@ void setup() {
    
     // affiche texte d'intro
     if(mode_screen=1){
+          play_startup();
           affiche_intro();
           delay(delay_affichage_ecran*1000);
     }
@@ -275,7 +306,6 @@ void setup() {
     //Create and Write the 1st ligne of the CSV file
         datachain += "Batch Number"; datachain += ";";
         datachain += "Date & heure"; datachain += ";"; 
-        datachain += "GPS_Lat"; datachain += ";"; datachain += "GPS_Lng"; datachain += ";";
         datachain += "Bat %"; datachain += ";" ; datachain += "Bat mV"; datachain += ";";
         datachain += "Intern Temp (C)"; datachain += ";";
         datachain += "Profondeur(m)"; datachain += ";";   datachain += "Temperature mer (C)"; datachain += ";";
@@ -285,11 +315,10 @@ void setup() {
         // print the datachain on the serial port
         Serial.println("Format de la chaine enregistrée : ");
         Serial.println(datachain);
-    
 
-        // on créer le nom du fichier
-        lecture_rtc();
-        filename = "/"+String(id_logger)+"_"+datenum+".csv";
+        // creating file name with the date
+        //lecture_rtc();
+        //filename = "/"+String(id_logger)+"_"+datenum+".csv";
         
         // save the datachain on the SD card
         File dataFile = SD.open(filename, FILE_APPEND);
@@ -305,14 +334,15 @@ void setup() {
           delay(3000);
         }
 
-    delay(500);
+    delay(300); 
 
     // affiche le message d'infos à l'ecran (nom de fichier, delay batch etc...)
     if(mode_screen=1){
       message1();
     }
 
-    //veille_ezos();
+    // play music to tell all it's ok
+    victory();
 
     bootCount = bootCount + 1; // change the bootcount number to skip the initial step after wake up
 
@@ -327,94 +357,46 @@ void setup() {
       Serial.print("------ BATCH NUMBER ---------"); Serial.println(batch_number); 
 
     // on récupére le nom de fichier pour l'enregistrement des data
-      lecture_rtc();
-      delay(300);
-      filename="/"+String(id_logger)+"_"+datenum+".csv";
+      //lecture_rtc();
+      //filename="/"+String(id_logger)+"_"+datenum+".csv";
       Serial.print("File name : "); Serial.println(filename);
 
-    // on reveille le GPS et on le lit une seule fois pour le meme batch de mesures
-        digitalWrite(gpspin, HIGH);
-        if(mode_screen=1) affiche_searchfix();                    // ecran recherche GPS fix
-        Serial.println("Searching GPS");
-        t0=millis();                            // temporisation pour attendre le fix du GPS et lecture du GPS
-        int gps_timer=t0+gps_time_out;
-        while(millis()<gps_timer){            // attends le delay imposer par config.txt, puis passe à la suite fix ou pas fix
-           //Read the gps
-           smartDelay(1000);  
-           if (millis() > 5000 && gps.charsProcessed() < 10){
-              Serial.println(F("No GPS data received: check wiring")); 
-           }
-           // if fix ok, break the while loop   
-           if(gps.location.isUpdated()){
-            if(mode_screen=1) affiche_fixok();         // ecran fix ok, maintenant les mesures seront affichés tout les x mins
-            Serial.println("Ok GPS fix");
-            break;
-           }
-           delay(500);
-        }
-        delay(500);
-  
-        // on stocke les valeurs de GPS
-        gps_lat = String(gps.location.lat(),6);
-        gps_long = String(gps.location.lng(),6);              
 
-        // cleaning sensors before measuring
-        Serial.println("Cleaning sensors ...");
-          sweep_motor(2, 2);
-        Serial.println("ok -- Sensors were cleaned");
-
-        delay(500);
-
-        // power off, GPS and cleaning motor
-        digitalWrite(gpspin, LOW);            // on éteint le GPS une fois lu
+    // Cleaning sensors function, if motor is present.... 
+      // // cleaning sensors before measuring
+      // Serial.println("Cleaning sensors ...");
+      //   sweep_motor(2, 2);
+      // Serial.println("ok -- Sensors were cleaned");
+      // delay(500);
 
       
-    // Reveillez l'alim de la trilux et la laisser chauffer
+    // We give time to the trilux sensors to become ready (delay de chauffe)
       Serial.println("on reveille la trilux, et on la laisse chauffer : ");Serial.print(delay_chauffe);Serial.println(" s");
-      //digitalWrite(isolpin, HIGH);
-      digitalWrite(pinFluo, HIGH);               // turn on the trilux sensor
       delay(delay_chauffe * 1000);               // give time to the trilux sensor to start (min 10 seconds)
-
-      digitalWrite(isopin, HIGH);      // on allume l'isolateur
-
     
-    // On lit tout les autres capteurs 1 à 1 autant de fois qu'indiquer dans le fichier config
-    
-    // Initialize pressure Sensor ------ fonctionne pour le moment mais à vérifier et ACHANGER
-        if (!sensor_bar30.init()) {                                            // Returns true if initialization was successful
-          Serial.println("Init failed!");                                     // We can't continue with the rest of the program unless we can initialize the sensor
-          Serial.println("Are SDA/SCL connected correctly?");
-          Serial.println("Blue Robotics Bar30: White=SDA, Green=SCL");
-          Serial.println("\n\n\n");
-          delay(3000);
-        }
-        sensor_bar30.setModel(MS5837::MS5837_30BA);
-        sensor_bar30.setFluidDensity(1029); // kg/m^3 (1029 for seawater, 997 for freshwater)
-
-    
-    delay(delay_lec);
-  
+    // We read all sensors as many time as written in config file
     for (int i = 0; i < nbrMes; i++) {
-      Serial.print("--- Serie n=° "); Serial.println(i + 1);
+      Serial.print("--- Serie n=° "); Serial.println(i + 1);   //Seriap print the number of the serie in a batch
 
-      // lecture des différents capteurs
-      lecture_rtc();            // lecture de l'horloge rtc
+      lecture_rtc();            // RTC clock readgin
       delay(delay_lec);
-      battery_gauge2();          // lecture des valeurs de la batterie
+      battery_gauge2();         // Batterie voltage reading
       delay(delay_lec);
-      mes_temp_int();           // temperature interne du boitier
+      mes_temp_int();           // Intern temperature reading
       delay(delay_lec);
-      mesure_pressure();        // measure water pressure/temp
+      mesure_temp();            // measure water temperature
       delay(delay_lec);
-      mesureEC();               // mesure de la conductivité EC de l'eau de mer
+      mesure_pressure();        // measure water pressure
+      delay(delay_lec);
+      mesureEC();               // measure of water conductivity
       delay(delay_lec);
       Serial.println("Start mesure fluo");
-      mes_fluo2();               // on lit la chaine et on l'enregistre dans la variable datafluo
+      mes_fluo2();              // read values of fluorimeter sensors
       Serial.print("start parse fluo");
-      parse_fluo();
+      parse_fluo();             // parse fluo chain and serial print it
       delay(delay_lec);
 
-      //calcul de la salinité
+      //Salinity calculator with conductivity measure
       float temp = wat_temp;
       float cond = atof(ecData)/1000;
       cal_sal(temp, cond);      
@@ -423,10 +405,9 @@ void setup() {
       String datachain = "";
       datachain += batch_number; datachain += ";";
       datachain += datetime; datachain += ";";
-      datachain += gps_lat; datachain += ";";datachain += gps_long; datachain += ";"; 
       datachain += bat_percent /* FuelGauge.percent() */; datachain += ";"; datachain += bat_voltage /* FuelGauge.voltage() */ ; datachain += ";";
       datachain += tempint; datachain += ";";
-      datachain += wat_depth; datachain += ";"; datachain += wat_temp; datachain += ";";
+      datachain += wat_depth; datachain += ";"; datachain += fast_temp; datachain += ";";
       datachain += ecData; datachain += ";";datachain += Salinity; datachain += ";";
       datachain += fluoFinal; //datachain += ";";
 
@@ -450,12 +431,6 @@ void setup() {
     }
     // fin des mesures
 
-
-
-    // On éteint les sensors pour la mise ne veille de l'esp32
-    //veille_ezos();                            // mise en veille de la carte Atlas
-    digitalWrite(pinFluo, LOW);               // turn on the trilux sensor
-    digitalWrite(isopin, LOW);
 
 
     // On affiche sur l'ecran la deniére serie du batch
@@ -494,6 +469,11 @@ void setup() {
   }
 
 
+  // On éteint les sensors pour la mise ne veille de l'esp32
+      digitalWrite(En_12v, LOW);               // turn off the trilux sensor
+      digitalWrite(En_5v, LOW);
+      delay(400);
+
   // Affichage du temps d'endormissement en fonction du temps d'exécution de lecture des capteurs 
   Serial.print("Temps de fonctionnement de ce lot = "); Serial.print(millis()); Serial.print("ms, ou "); Serial.print(millis()/1000);Serial.println(" Secondes");
   //Serial.print("Temp de dodo = "); Serial.print(((TIME_TO_SLEEP*uS_TO_S_FACTOR)-millis()*1000)/uS_TO_S_FACTOR); 
@@ -524,6 +504,17 @@ void loop() {
 /////////////////////////////////////////////////////////////////
 //                          FONCTION d'affichage 
 /////////////////////////////////////////////////////////////////
+
+
+void play_startup(){
+  for (int i=0; i<=5; i++){
+    digitalWrite(lightPin, HIGH);
+    delay(200);
+    digitalWrite(lightPin, LOW);
+    delay(200);
+  }
+  digitalWrite(lightPin, HIGH);
+}
 
 void affiche_intro() {                                 // texte intro à l'allumage, juste pour faire jolie et afficher éventuellement les versions du programme
   display.setRotation(3);
@@ -635,43 +626,89 @@ void errormessage_battery() {                                      // message d'
 }
 
 
-void affiche_searchfix(){                 //message de recherche de GPS
-  display.setRotation(3);
-  display.fillScreen(GxEPD_WHITE);
+void play_start(){
+  ledcWriteNote(TONE_PWM_CHANNEL, NOTE_D, 6);
+  delay(100);
+  ledcWriteNote(TONE_PWM_CHANNEL, NOTE_D, 6);
+  delay(100);
+  ledcWriteNote(TONE_PWM_CHANNEL, NOTE_D, 6);
+  delay(100);
+  ledcWrite(TONE_PWM_CHANNEL, 0);
+
+
+}
+
+void victory() {
+  ledcWriteNote(TONE_PWM_CHANNEL, NOTE_G, 5);
+  delay(150);
+  ledcWriteNote(TONE_PWM_CHANNEL, NOTE_B, 5);
+  delay(150);
+  ledcWriteNote(TONE_PWM_CHANNEL, NOTE_D, 6);
+  delay(300);
+  ledcWriteNote(TONE_PWM_CHANNEL, NOTE_B, 5);
+  delay(150);
+  ledcWriteNote(TONE_PWM_CHANNEL, NOTE_D, 6);
+  delay(700);
+  ledcWrite(TONE_PWM_CHANNEL, 0);
+}
+
+
+void playagain() {
+  ledcWriteNote(TONE_PWM_CHANNEL, NOTE_F, 4);
+  delay(150);
+  ledcWriteNote(TONE_PWM_CHANNEL, NOTE_D, 4);
+  delay(150);
+  ledcWriteNote(TONE_PWM_CHANNEL, NOTE_A, 3);
+  delay(150);
+  ledcWriteNote(TONE_PWM_CHANNEL, NOTE_B, 3);
+  delay(700);
+  ledcWrite(TONE_PWM_CHANNEL, 0);
+}
+
+
+// void affiche_searchfix(){                 //message de recherche de GPS
+//   display.setRotation(3);
+//   display.fillScreen(GxEPD_WHITE);
   
-  display.setTextColor(GxEPD_BLACK);
-  display.setFont(f2);
-  display.setCursor(5, 55);
-  display.println("waiting  ...");
+//   display.setTextColor(GxEPD_BLACK);
+//   display.setFont(f2);
+//   display.setCursor(5, 55);
+//   display.println("waiting  ...");
  
-      //display.update();        // pour ecran V1
-      display.nextPage();  //  pour ecran V2 
-}
+//       //display.update();        // pour ecran V1
+//       display.nextPage();  //  pour ecran V2 
+// }
 
 
-void affiche_fixok(){                     //message GPS ok et affiche delay entre les series de mesures
-  display.setRotation(3);
-  display.fillScreen(GxEPD_WHITE);
+// void affiche_fixok(){                     //message GPS ok et affiche delay entre les series de mesures
+//   display.setRotation(3);
+//   display.fillScreen(GxEPD_WHITE);
   
-  display.setTextColor(GxEPD_BLACK);
-  display.setFont(f2);
-  display.setCursor(0, 20);
-  display.println("GPS : fix ok ");
-  display.setCursor(60,20);
-  display.print("Lat:");display.print(gps.location.lat(), 5);
-  display.setCursor(120,20);
-  display.print("Lng:");display.print(gps.location.lng(), 5); 
+//   display.setTextColor(GxEPD_BLACK);
+//   display.setFont(f2);
+//   display.setCursor(0, 20);
+//   display.println("GPS : fix ok ");
+//   display.setCursor(60,20);
+//   display.print("Lat:");display.print(gps.location.lat(), 5);
+//   display.setCursor(120,20);
+//   display.print("Lng:");display.print(gps.location.lng(), 5); 
 
 
   
-      //display.update();        // pour ecran V1
-      display.nextPage();  //  pour ecran V2 
-}
+//       //display.update();        // pour ecran V1
+//       display.nextPage();  //  pour ecran V2 
+// }
 
 
 /////////////////////////////////////////////////////////////////
 //              FONCTIONs de gestions des sensors
 /////////////////////////////////////////////////////////////////
+
+void mesure_temp(){
+  sensor_fastTemp.read(); 
+  fast_temp = sensor_fastTemp.temperature();
+}
+
 
 void mesure_pressure() {                              // fonction mesure de la pression et température sur le capteur blue robotics
 
@@ -702,43 +739,43 @@ void mesure_pressure() {                              // fonction mesure de la p
 
 }
 
-// Test/initialization pressure sensor
-void test_bar(){
-      if(!sensor_bar30.init()) {                                            // Returns true if initialization was successful
-      Serial.println("Init failed!");                                     // We can't continue with the rest of the program unless we can initialize the sensor
-      Serial.println("Are SDA/SCL connected correctly?");
-      Serial.println("Blue Robotics Bar30: White=SDA, Green=SCL");
-      Serial.println("\n\n\n");
-      errormessage_bar();
-    }  
-}
+// // Test/initialization pressure sensor
+// void test_bar(){
+//       if(!sensor_bar30.init()) {                                            // Returns true if initialization was successful
+//       Serial.println("Init failed!");                                     // We can't continue with the rest of the program unless we can initialize the sensor
+//       Serial.println("Are SDA/SCL connected correctly?");
+//       Serial.println("Blue Robotics Bar30: White=SDA, Green=SCL");
+//       Serial.println("\n\n\n");
+//       errormessage_bar();
+//     }  
+// }
 
 
 
 
 
-// Fonction pour le fluorimetre
-void mes_fluo(){
-  while(Serial_exp.available()){
-    c = Serial_exp.read();
-    if(StartStock==1){
-        switch (c) {
-          case marqueurDeFin:
-          //Serial.print("fluochain : "); Serial.println(fluochain);
-          datafluo = fluochain;
-          fluochain="";
-          StartStock=0;
-          default:
-          if(c!=marqueurDeFin){fluochain += char(c);}
-        }
-    }
-    if(c==marqueurDeFin){
-      StartStock = 1;
-    }
-  }
+// // Fonction pour le fluorimetre
+// void mes_fluo(){
+//   while(Serial_exp.available()){
+//     c = Serial_exp.read();
+//     if(StartStock==1){
+//         switch (c) {
+//           case marqueurDeFin:
+//           //Serial.print("fluochain : "); Serial.println(fluochain);
+//           datafluo = fluochain;
+//           fluochain="";
+//           StartStock=0;
+//           default:
+//           if(c!=marqueurDeFin){fluochain += char(c);}
+//         }
+//     }
+//     if(c==marqueurDeFin){
+//       StartStock = 1;
+//     }
+//   }
 
-  Serial.print("datafluo : "); Serial.println(datafluo); // juste pour voir la valeur de datafluo
-}
+//   Serial.print("datafluo : "); Serial.println(datafluo); // juste pour voir la valeur de datafluo
+// }
 
 
 void mes_fluo2(){
@@ -864,13 +901,13 @@ void mesureEC() {
 }
 
 
-void veille_ezos(){                          //mise en veille du capteur aprés utilisation (la fonction "r" permettra de reveiller et lire le capteur).
-       //veille EC
-        delay(100);
-        Wire.beginTransmission(ecAddress);    // Call the circuit by its ID number.  
-        Wire.write("Sleep");                  // Transmit the command that was sent through the serial port.
-        Wire.endTransmission();               // End the I2C data transmission. 
-}
+// void veille_ezos(){                          //mise en veille du capteur aprés utilisation (la fonction "r" permettra de reveiller et lire le capteur).
+//        //veille EC
+//         delay(100);
+//         Wire.beginTransmission(ecAddress);    // Call the circuit by its ID number.  
+//         Wire.write("Sleep");                  // Transmit the command that was sent through the serial port.
+//         Wire.endTransmission();               // End the I2C data transmission. 
+// }
 
 
 void cal_sal(float t, float C){         // fonction sinplifié à intégrer dans un code
@@ -990,23 +1027,23 @@ void lecture_rtc() {                          // fonction lecture de l'horloge R
 }
 
 
-void battery_gauge(){
-  FuelGauge.wake();
-  delay(100);
-  // Get the voltage, battery percent
-  // and other properties.
-//  Serial.print("Version:   "); Serial.println(FuelGauge.version());
-//  Serial.print("ADC:   "); Serial.println(FuelGauge.adc());
-//  Serial.print("Voltage:   "); Serial.print(FuelGauge.voltage()); Serial.println(" v");
-//  Serial.print("Percent:   "); Serial.print(FuelGauge.percent()); Serial.println("%");
-//  Serial.print("Is Sleeping:   "); Serial.println(FuelGauge.isSleeping() ? "Yes" : "No");
-//  Serial.print("Alert: "); Serial.println(FuelGauge.alertIsActive() ? "Yes" : "No");
-//  Serial.print("Threshold: "); Serial.println(FuelGauge.getThreshold());
-//  Serial.print("Compensation:  0x"); Serial.println(FuelGauge.compensation(), HEX);
-//  Serial.print(" ");
-//  delay(200);
-//  FuelGauge.sleep();
-}
+// void battery_gauge(){
+//   FuelGauge.wake();
+//   delay(100);
+//   // Get the voltage, battery percent
+//   // and other properties.
+// //  Serial.print("Version:   "); Serial.println(FuelGauge.version());
+// //  Serial.print("ADC:   "); Serial.println(FuelGauge.adc());
+// //  Serial.print("Voltage:   "); Serial.print(FuelGauge.voltage()); Serial.println(" v");
+// //  Serial.print("Percent:   "); Serial.print(FuelGauge.percent()); Serial.println("%");
+// //  Serial.print("Is Sleeping:   "); Serial.println(FuelGauge.isSleeping() ? "Yes" : "No");
+// //  Serial.print("Alert: "); Serial.println(FuelGauge.alertIsActive() ? "Yes" : "No");
+// //  Serial.print("Threshold: "); Serial.println(FuelGauge.getThreshold());
+// //  Serial.print("Compensation:  0x"); Serial.println(FuelGauge.compensation(), HEX);
+// //  Serial.print(" ");
+// //  delay(200);
+// //  FuelGauge.sleep();
+// }
 
 void battery_gauge2(){
   // mesure tension 
@@ -1015,21 +1052,12 @@ void battery_gauge2(){
   
   // calcul pourcentage
   bat_percent = 3313.2*(pow(bat_voltage, 4))-52290*(pow(bat_voltage,3))+309004*(pow(bat_voltage,2))-810173*(bat_voltage)+795097 ;
-  // coefficiant calculé avec une regression d'ordre 4 sur les valeurs théorique de charges/décharge d'un accu lipo
+  // coefficient calculé avec une regression d'ordre 4 sur les valeurs théorique de charges/décharge d'un accu lipo
 
   Serial.print("Batterie voltage : "); Serial.print(bat_voltage);Serial.print("V -- Batterie charge : "); Serial.print(bat_percent); Serial.println("%");   
 }
 
 
-static void smartDelay(unsigned long ms)      //fonction pour GPS         
-{
-  unsigned long start = millis();
-  do
-  {
-    while (Serial_gps.available())
-      gps.encode(Serial_gps.read());
-  } while (millis() - start < ms);
-}
 
 
 // to initialize and test SD card
@@ -1038,6 +1066,7 @@ void test_sd(){
   if (!SD.begin(cspin_SD)) {                      // // see if the card is present and can be initialized, ajouter ici chipSelect ou 5 pour la pin 5 par default
   Serial.println("Card failed, or not present");
   errormessage_sd();
+  playagain();
   // don't do anything more:
   while(1);
   }
@@ -1114,7 +1143,7 @@ void lecture_config(){
 //       //allumer le GPS pour la recherche de satellite
 //          affiche_searchfix();                    // ecran recherche GPS fix
 //          Serial.println("Searching GPS :");
-//          digitalWrite(gpspin, HIGH);             // GPS on
+//          digitalWrite(En_5v, HIGH);             // GPS on
 //          delay(1000);                            // pour que le GPS se reveille tranquillement
 //          t0=millis();                            // temporisation pour attendre le fix du GPS et lecture du GPS
 //          int gps_timer=t0+gps_timeOut;
